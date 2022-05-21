@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Normal
 import numpy as np
 from mlagents_envs.environment import UnityEnvironment
@@ -16,6 +17,29 @@ else:
 N_STATES  = 243
 N_ACTIONS = 39
 HIDDEN_UNITS = 512
+LEARNING_RATE = 0.0003
+N_AGENTS = 10  #The number of training scenes in Unity 
+
+INTERACTION_STEPS = 254  #(Walker.yaml 2048) buffer_size=N_AGENTS * INTERACTION_STEPS=20480
+BATCH_SIZE = 254         #Walker.yaml 2048
+
+a = torch.FloatTensor([[0]]*N_AGENTS ) 
+b = torch.FloatTensor([[0]*N_ACTIONS]*N_AGENTS ) 
+c = torch.FloatTensor([[0]*N_STATES]*N_AGENTS ) 
+VALUES =REWARDS = MASKS = [a]*INTERACTION_STEPS
+LOG_PROBS = ACTIONS = [b]*INTERACTION_STEPS
+STATES = NEXT_STATES = [c]*INTERACTION_STEPS
+
+GAMMA = 0.995
+LAMBD = 0.95
+BETA = 0.005
+EPSILON = 0.2
+N_EPOCH = 3
+
+MAX_STEPS = 30000    #Walker.yaml 30M
+SUMMARY_FREQ = 3000  #Walker.yaml 30K
+TIME_HORIZON = 1000  #I do not use this parameter in my porgram
+
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
@@ -147,9 +171,7 @@ def ppo_iter():
 
 
 def ppo_update():
-    #print("epoch:")
     for epoch in range(N_EPOCH):
-        #print(epoch, end = ", ")
         for b_s, b_a, b_s_, b_old_LOG_PROBS, b_return, b_advantage in ppo_iter():
             dist, value = NET(b_s.to(device))       
             critic_loss = (b_return.to(device) - value).pow(2).mean()
@@ -169,29 +191,7 @@ def ppo_update():
 
 # # Main
 NET = Net().to(device)
-LEARNING_RATE = 0.0003
 OPTIMIZER = optim.Adam(NET.parameters(), lr=LEARNING_RATE )
-
-N_AGENTS = 10  #The number of training scenes in Unity 
-INTERACTION_STEPS = 254  #(Walker.yaml 2048) buffer_size=N_AGENTS * INTERACTION_STEPS=20480
-
-a = torch.FloatTensor([[0]]*N_AGENTS ) 
-b = torch.FloatTensor([[0]*N_ACTIONS]*N_AGENTS ) 
-c = torch.FloatTensor([[0]*N_STATES]*N_AGENTS ) 
-
-VALUES =REWARDS = MASKS = [a]*INTERACTION_STEPS
-LOG_PROBS = ACTIONS = [b]*INTERACTION_STEPS
-STATES = NEXT_STATES = [c]*INTERACTION_STEPS
-
-GAMMA = 0.995
-LAMBD = 0.95
-BATCH_SIZE = 254         #Walker.yaml 2048
-BETA = 0.005
-EPSILON = 0.2
-N_EPOCH = 3
-MAX_STEPS = 30000    #Walker.yaml 30M
-SUMMARY_FREQ = 3000  #Walker.yaml 30K
-TIME_HORIZON = 1000  #I do not use this parameter in my porgram
 
 print("Please press play in Unity editor")
 ENV = UnityEnvironment(file_name= None, base_port=5004)
@@ -199,18 +199,14 @@ ENV.reset()
 BEHAVIOR_NAME = list(ENV.behavior_specs.keys())
 BEHAVIOR_NAME = BEHAVIOR_NAME[0]
 
-ActorLossLst = []
-CriticLossLst = []
-ForwardLossLst = []
 steps  = 0 
 summary = SUMMARY_FREQ
+writer = SummaryWriter() # Writer will output to ./runs/ directory by default
 
 while (steps < MAX_STEPS):
-    #print("Collecting ", INTERACTION_STEPS, " training steps from ", N_AGENTS, " agents", end=": ")
-    collect_training_data(print_message=True)
+    collect_training_data(print_message=False)
     _, next_value = NET(NEXT_STATES[-1].to(device)) 
     
-    print("Compute GAE of these training data set")
     RETURNS = compute_gae(next_value)
     MERGED_RETURNS   = torch.cat(RETURNS).detach()
     MERGED_LOG_PROBS = torch.cat(LOG_PROBS).detach()
@@ -220,16 +216,21 @@ while (steps < MAX_STEPS):
     MERGED_ACTIONS   = torch.cat(ACTIONS)
     MERGED_ADVANTAGES = MERGED_RETURNS - MERGED_VALUES
     
-    print("Optimize NN with PPO")
     critic_loss, actor_loss = ppo_update()
-    CriticLossLst.append(critic_loss)
-    ActorLossLst.append(actor_loss)
     if(steps > summary):
-        print("Already train ", steps, " steps") 
+        print("No of training steps = ", steps)
+        mean_reward = float(torch.mean(MERGED_RETURNS))
+        print("Reward = ", round(mean_reward, 2))
         print("Critic loss = ", round(critic_loss, 2), " Actor loss = ", round(actor_loss, 2))
+        
+        writer.add_scalar("Loss/Actor loss", actor_loss, steps)
+        writer.add_scalar("Loss/Critic loss", critic_loss, steps)
+        writer.add_scalar("Reward", actor_loss, steps)
+
+        fname = "NN_" + str(steps) + ".pth"
+        torch.save(NET.state_dict(), fname)
         summary += SUMMARY_FREQ
 
     steps += INTERACTION_STEPS*N_AGENTS
 
 ENV.close()
-
